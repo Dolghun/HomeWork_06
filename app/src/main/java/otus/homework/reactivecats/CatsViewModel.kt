@@ -1,39 +1,66 @@
 package otus.homework.reactivecats
 
 import android.content.Context
-import android.util.Log
 import androidx.lifecycle.LiveData
 import androidx.lifecycle.MutableLiveData
 import androidx.lifecycle.ViewModel
 import androidx.lifecycle.ViewModelProvider
-import io.reactivex.Observable
+import io.reactivex.Flowable
 import io.reactivex.android.schedulers.AndroidSchedulers
-import io.reactivex.disposables.Disposable
-import retrofit2.Call
-import retrofit2.Callback
-import retrofit2.Response
+import io.reactivex.disposables.CompositeDisposable
+import io.reactivex.schedulers.Schedulers
+import retrofit2.HttpException
 import java.util.concurrent.TimeUnit
 
 class CatsViewModel(
-    catsService: CatsService,
+    private val catsService: CatsService,
     private val localCatFactsGenerator: LocalCatFactsGenerator,
-    context: Context
+    context: Context,
 ) : ViewModel() {
 
+    private val disposables = CompositeDisposable()
+
     private val _catsLiveData = MutableLiveData<Result>()
-    private var disposable: Disposable = Observable.interval(2000, TimeUnit.MILLISECONDS)
-        .flatMap { catsService.getCatFact() }
-        .onErrorResumeNext(localCatFactsGenerator.generateCatFact())
-        .observeOn(AndroidSchedulers.mainThread())
-        .subscribe {
-            _catsLiveData.value = Success(fact = it)
-        }
     val catsLiveData: LiveData<Result> = _catsLiveData
 
+    init {
+        val factDisposable = getFacts()
+            .subscribeOn(Schedulers.io())
+            .observeOn(AndroidSchedulers.mainThread())
+            .subscribe(
+                { fact ->
+                    _catsLiveData.value = Success(fact)
+                },
+                { e ->
+                    _catsLiveData.value = handleError(e, context)
+                }
+            )
+        disposables.add(factDisposable)
+    }
+
+    private fun handleError(e: Throwable, context: Context): Result {
+        return if (e is HttpException) {
+            Error(
+                e.response()?.errorBody()?.string()
+                    ?: context.getString(R.string.default_error_text)
+            )
+        } else {
+            ServerError
+        }
+    }
+
+    private fun getFacts(): Flowable<Fact> {
+        return Flowable.interval(2000, TimeUnit.MILLISECONDS)
+            .switchMap {
+                catsService.getCatFact()
+                    .toFlowable()
+                    .onErrorResumeNext(localCatFactsGenerator.generateCatFact().toFlowable())
+            }
+    }
 
     override fun onCleared() {
         super.onCleared()
-        disposable.dispose()
+        disposables.dispose()
     }
 }
 
